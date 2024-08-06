@@ -217,6 +217,14 @@ wss.on('connection', (ws) => {
 
             if (parsedMessage.type === 'register') {
                 clients.set(parsedMessage.userKey, ws);
+            } else if (parsedMessage.type === 'offer' || parsedMessage.type === 'answer' || parsedMessage.type === 'candidate') {
+                const targetClient = clients.get(parsedMessage.target);
+                if (targetClient) {
+                    targetClient.send(JSON.stringify({
+                        ...parsedMessage,
+                        sender: parsedMessage.userKey,
+                    }));
+                }
             }
         } catch (error) {
             console.error('Error parsing message:', error);
