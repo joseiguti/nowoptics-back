@@ -22,8 +22,16 @@ async function initializeMessages() {
         if (existingKeys.length === 0) {
             console.log('Initializing default messages...');
             const defaultMessages = [
-                { sender_id: 'user_one', receiver_id: 'user_two', content: 'Hey whats up!' },
-                { sender_id: 'user_two', receiver_id: 'user_one', content: 'Hi there, this chat is amazing!' },
+                {
+                    sender_id: 'user_one',
+                    receiver_id: 'user_two',
+                    content: 'Hey whats up!'
+                },
+                {
+                    sender_id: 'user_two',
+                    receiver_id: 'user_one',
+                    content: 'Hi there, this chat is amazing!'
+                },
             ];
 
             for (const msg of defaultMessages) {
@@ -109,7 +117,11 @@ app.post('/messages', async (req, res) => {
         const { sender_id, receiver_id, content } = req.body;
 
         if (!sender_id || !receiver_id || !content) {
-            return res.status(400).json({ error: 'sender_id, receiver_id, and content are required' });
+            return res.status(400).json(
+                {
+                    error: 'sender_id, receiver_id, and content are required'
+                }
+            );
         }
 
         const messageData = await createMessage(sender_id, receiver_id, content);
@@ -217,7 +229,9 @@ wss.on('connection', (ws) => {
 
             if (parsedMessage.type === 'register') {
                 clients.set(parsedMessage.userKey, ws);
-            } else if (parsedMessage.type === 'offer' || parsedMessage.type === 'answer' || parsedMessage.type === 'candidate') {
+            } else if (parsedMessage.type === 'offer' ||
+                parsedMessage.type === 'answer' ||
+                parsedMessage.type === 'candidate') {
                 const targetClient = clients.get(parsedMessage.target);
                 if (targetClient) {
                     targetClient.send(JSON.stringify({
