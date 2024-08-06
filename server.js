@@ -1,9 +1,14 @@
 const express = require('express');
 const cors = require('cors');
+const http = require('http'); // Importa el módulo HTTP
+const WebSocket = require('ws'); // Importa WebSocket
 const redis = require('./redisClient');
 const app = express();
 
-app.use(cors()); // Usar cors como middleware
+app.use(cors({
+    origin: 'http://localhost:8080', // Cambia según la URL de tu cliente
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+}));
 app.use(express.json());
 
 async function generateId() {
@@ -66,6 +71,12 @@ app.post('/messages', async (req, res) => {
         };
 
         await redis.hmset(messageKey, messageData);
+
+        // Notificar a los clientes sobre el nuevo mensaje
+        broadcast({
+            type: 'new_message',
+            data: messageData,
+        });
 
         res.status(201).json({ message: 'Message created', data: messageData });
     } catch (err) {
@@ -139,6 +150,12 @@ app.put('/messages/:id', async (req, res) => {
 
         const updatedMessage = await redis.hgetall(messageKey);
 
+        // Notificar a los clientes sobre el mensaje actualizado
+        broadcast({
+            type: 'update_message',
+            data: updatedMessage,
+        });
+
         res.json({ message: 'Message updated', data: updatedMessage });
     } catch (err) {
         console.error(err);
@@ -156,6 +173,12 @@ app.delete('/messages/:id', async (req, res) => {
             return res.status(404).json({ error: 'Message not found' });
         }
 
+        // Notificar a los clientes sobre el mensaje eliminado
+        broadcast({
+            type: 'delete_message',
+            data: { id },
+        });
+
         res.json({ message: 'Message deleted' });
     } catch (err) {
         console.error(err);
@@ -163,13 +186,52 @@ app.delete('/messages/:id', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-    console.log(`Server running on port ${PORT}`);
-    await initializeMessages();
+// Inicia el servidor HTTP
+const server = http.createServer(app);
+
+// Configura el servidor WebSocket
+const wss = new WebSocket.Server({ server });
+const clients = new Map(); // Mapa para almacenar las conexiones de clientes
+
+// Maneja las conexiones de WebSocket
+wss.on('connection', (ws) => {
+    console.log('New client connected');
+
+    // Maneja mensajes recibidos del cliente
+    ws.on('message', (message) => {
+        try {
+            const parsedMessage = JSON.parse(message);
+
+            // Guarda el identificador del cliente
+            if (parsedMessage.type === 'register') {
+                clients.set(parsedMessage.userKey, ws);
+            }
+        } catch (error) {
+            console.error('Error parsing message:', error);
+        }
+    });
+
+    // Elimina al cliente cuando se desconecta
+    ws.on('close', () => {
+        console.log('Client disconnected');
+        clients.forEach((client, userKey) => {
+            if (client === ws) {
+                clients.delete(userKey);
+            }
+        });
+    });
 });
 
-app.use(cors({
-    origin: 'http://localhost:8080',
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-}));
+// Función para enviar mensajes a todos los clientes
+function broadcast(data) {
+    clients.forEach((ws) => {
+        ws.send(JSON.stringify(data));
+    });
+}
+
+// Escucha en el puerto 3000 para el servidor HTTP
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, async () => {
+    console.log(`Server running on port ${PORT}`);
+    await initializeMessages(); // Inicializar los mensajes por defecto
+});
