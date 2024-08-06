@@ -1,19 +1,19 @@
 const express = require('express');
 const cors = require('cors');
-const http = require('http'); // Importa el módulo HTTP
-const WebSocket = require('ws'); // Importa WebSocket
+const http = require('http');
+const WebSocket = require('ws');
 const redis = require('./redisClient');
 const app = express();
 
 app.use(cors({
-    origin: 'http://localhost:8080', // Cambia según la URL de tu cliente
+    origin: 'http://localhost:8080',
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
 }));
+
 app.use(express.json());
 
 async function generateId() {
-    const id = await redis.incr('message_id');
-    return id;
+    return await redis.incr('message_id');
 }
 
 async function initializeMessages() {
@@ -49,6 +49,61 @@ async function initializeMessages() {
     }
 }
 
+async function createMessage(sender_id, receiver_id, content) {
+    const id = await generateId();
+    const timestamp = new Date().toISOString();
+    const messageKey = `message:${id}`;
+
+    const messageData = {
+        id,
+        sender_id,
+        receiver_id,
+        content,
+        created_at: timestamp,
+        updated_at: null,
+    };
+
+    await redis.hmset(messageKey, messageData);
+
+    return messageData;
+}
+
+async function getAllMessages() {
+    const keys = await redis.keys('message:*');
+    const messages = [];
+
+    for (const key of keys) {
+        const message = await redis.hgetall(key);
+        messages.push(message);
+    }
+
+    messages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+    return messages;
+}
+
+async function getMessageById(id) {
+    const messageKey = `message:${id}`;
+    return await redis.hgetall(messageKey);
+}
+
+async function updateMessageById(id, content) {
+    const messageKey = `message:${id}`;
+    const updatedAt = new Date().toISOString();
+
+    await redis.hmset(messageKey, {
+        content,
+        updated_at: updatedAt,
+    });
+
+    return await redis.hgetall(messageKey);
+}
+
+async function deleteMessageById(id) {
+    const messageKey = `message:${id}`;
+    return await redis.del(messageKey);
+}
+
 app.post('/messages', async (req, res) => {
     try {
         const { sender_id, receiver_id, content } = req.body;
@@ -57,22 +112,8 @@ app.post('/messages', async (req, res) => {
             return res.status(400).json({ error: 'sender_id, receiver_id, and content are required' });
         }
 
-        const id = await generateId();
-        const timestamp = new Date().toISOString();
+        const messageData = await createMessage(sender_id, receiver_id, content);
 
-        const messageKey = `message:${id}`;
-        const messageData = {
-            id,
-            sender_id,
-            receiver_id,
-            content,
-            created_at: timestamp,
-            updated_at: null,
-        };
-
-        await redis.hmset(messageKey, messageData);
-
-        // Notificar a los clientes sobre el nuevo mensaje
         broadcast({
             type: 'new_message',
             data: messageData,
@@ -87,20 +128,7 @@ app.post('/messages', async (req, res) => {
 
 app.get('/messages', async (req, res) => {
     try {
-        const keys = await redis.keys('message:*');
-        const messages = [];
-
-        for (const key of keys) {
-            const message = await redis.hgetall(key);
-            messages.push(message);
-        }
-
-        messages.sort((a, b) => {
-            const dateA = new Date(a.created_at);
-            const dateB = new Date(b.created_at);
-            return dateA - dateB;
-        });
-
+        const messages = await getAllMessages();
         res.json(messages);
     } catch (err) {
         console.error(err);
@@ -111,8 +139,7 @@ app.get('/messages', async (req, res) => {
 app.get('/messages/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const messageKey = `message:${id}`;
-        const message = await redis.hgetall(messageKey);
+        const message = await getMessageById(id);
 
         if (Object.keys(message).length === 0) {
             return res.status(404).json({ error: 'Message not found' });
@@ -134,23 +161,14 @@ app.put('/messages/:id', async (req, res) => {
             return res.status(400).json({ error: 'Content is required' });
         }
 
-        const messageKey = `message:${id}`;
-        const exists = await redis.exists(messageKey);
+        const exists = await redis.exists(`message:${id}`);
 
         if (!exists) {
             return res.status(404).json({ error: 'Message not found' });
         }
 
-        const updatedAt = new Date().toISOString();
+        const updatedMessage = await updateMessageById(id, content);
 
-        await redis.hmset(messageKey, {
-            content,
-            updated_at: updatedAt,
-        });
-
-        const updatedMessage = await redis.hgetall(messageKey);
-
-        // Notificar a los clientes sobre el mensaje actualizado
         broadcast({
             type: 'update_message',
             data: updatedMessage,
@@ -166,14 +184,12 @@ app.put('/messages/:id', async (req, res) => {
 app.delete('/messages/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const messageKey = `message:${id}`;
-        const result = await redis.del(messageKey);
+        const result = await deleteMessageById(id);
 
         if (result === 0) {
             return res.status(404).json({ error: 'Message not found' });
         }
 
-        // Notificar a los clientes sobre el mensaje eliminado
         broadcast({
             type: 'delete_message',
             data: { id },
@@ -186,23 +202,19 @@ app.delete('/messages/:id', async (req, res) => {
     }
 });
 
-// Inicia el servidor HTTP
+
 const server = http.createServer(app);
-
-// Configura el servidor WebSocket
 const wss = new WebSocket.Server({ server });
-const clients = new Map(); // Mapa para almacenar las conexiones de clientes
+const clients = new Map();
 
-// Maneja las conexiones de WebSocket
 wss.on('connection', (ws) => {
     console.log('New client connected');
 
-    // Maneja mensajes recibidos del cliente
+    // Manejar mensajes recibidos del cliente
     ws.on('message', (message) => {
         try {
             const parsedMessage = JSON.parse(message);
 
-            // Guarda el identificador del cliente
             if (parsedMessage.type === 'register') {
                 clients.set(parsedMessage.userKey, ws);
             }
@@ -211,7 +223,6 @@ wss.on('connection', (ws) => {
         }
     });
 
-    // Elimina al cliente cuando se desconecta
     ws.on('close', () => {
         console.log('Client disconnected');
         clients.forEach((client, userKey) => {
@@ -222,16 +233,14 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Función para enviar mensajes a todos los clientes
 function broadcast(data) {
     clients.forEach((ws) => {
         ws.send(JSON.stringify(data));
     });
 }
 
-// Escucha en el puerto 3000 para el servidor HTTP
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
     console.log(`Server running on port ${PORT}`);
-    await initializeMessages(); // Inicializar los mensajes por defecto
+    await initializeMessages();
 });
